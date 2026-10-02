@@ -42,7 +42,7 @@ app.post('/api/chat', async (req, res) => {
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3-32b',
+        model: 'openai/gpt-oss-120b',
         messages: [
           { role: 'system', content: PROMPT + hint },
           { role: 'user', content: message }
