@@ -13,27 +13,23 @@ app.use((req, res, next) => {
 });
 
 const PROMPT = `
-Ты — Novus_Куёвус, топовый senior-разработчик и эксперт по всем языкам программирования:
-Python, JavaScript, TypeScript, C++, C#, Java, Kotlin, Swift, Go, Rust, PHP, SQL,
-HTML/CSS, Bash, а также фреймворки (React, Vue, Node.js, Django, Flask, Laravel, .NET, PyTorch).
-
+Ты — Novus_Куёвус, топовый senior-разработчик и эксперт по всем языкам программирования.
 ПРАВИЛА:
 1. Отвечай кратко, точно, по делу.
 2. Давай рабочий код с комментариями.
 3. Указывай язык в блоке кода.
-4. Находи ошибки в коде пользователя.
-5. Если не знаешь — честно скажи.
-6. Пиши на русском, код — на английском.
-7. Эмодзи 0–2 на сообщение.
-8. Держи контекст беседы.
+4. Если не знаешь — честно скажи.
+5. Пиши на русском, код — на английском.
+6. Эмодзи 0–2 на сообщение.
 `;
 
+/* ============ ОБЫЧНЫЙ ЧАТ ============ */
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, nickname } = req.body;
     if (!message) return res.status(400).json({ error: 'Пустое сообщение' });
 
-    const hint = nickname ? `\nПользователя зовут ${nickname}. Обращайся по имени.` : '';
+    const hint = nickname ? `\nПользователя зовут ${nickname}.` : '';
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -47,19 +43,82 @@ app.post('/api/chat', async (req, res) => {
           { role: 'system', content: PROMPT + hint },
           { role: 'user', content: message }
         ],
-        temperature: 0.3,
+        temperature: 0.5,
         max_tokens: 2048
       })
     });
 
     const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: data.error?.message || 'Ошибка Groq' });
-    }
-
+    if (!response.ok) return res.status(500).json({ error: data.error?.message || 'Ошибка Groq' });
     res.json({ reply: data.choices[0].message.content });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка: ' + e.message });
+  }
+});
+
+/* ============ ПОИСК В ИНТЕРНЕТЕ (DuckDuckGo + Groq) ============ */
+app.post('/api/search', async (req, res) => {
+  try {
+    const { query } = req.body;
+    if (!query) return res.status(400).json({ error: 'Пустой запрос' });
+
+    // Шаг 1: ищем в DuckDuckGo (бесплатно, без ключа)
+    let webContext = '';
+    try {
+      const ddgRes = await fetch(
+        'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1&skip_disambig=1'
+      );
+      const ddgData = await ddgRes.json();
+
+      const parts = [];
+      if (ddgData.AbstractText) parts.push('Кратко: ' + ddgData.AbstractText);
+      if (ddgData.Answer) parts.push('Ответ: ' + ddgData.Answer);
+      if (ddgData.RelatedTopics) {
+        ddgData.RelatedTopics.slice(0, 5).forEach(t => {
+          if (t.Text) parts.push('- ' + t.Text);
+        });
+      }
+      webContext = parts.join('\n') || 'В интернете прямых данных не найдено.';
+    } catch (e) {
+      webContext = 'Не удалось получить данные из поиска.';
+    }
+
+    // Шаг 2: передаём в Groq, чтобы он сделал нормальный ответ
+    const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-120b',
+        messages: [
+          {
+            role: 'system',
+            content: `Ты — Novus_Куёвус с доступом к свежим данным из интернета.
+Тебе дают результаты поиска — сформируй на их основе ответ пользователю.
+Пиши кратко (до 5 абзацев), по делу. Если данных мало — честно скажи об этом.
+Не выдумывай факты, которых нет в предоставленных данных.`
+          },
+          {
+            role: 'user',
+            content: `Запрос: ${query}\n\nДанные из поиска:\n${webContext}`
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1500
+      })
+    });
+
+    const aiData = await aiRes.json();
+    if (!aiRes.ok) return res.status(500).json({ error: aiData.error?.message || 'Ошибка Groq' });
+
+    res.json({
+      reply: aiData.choices[0].message.content,
+      sources: webContext
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
   }
 });
 
