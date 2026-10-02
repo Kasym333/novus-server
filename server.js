@@ -56,13 +56,12 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-/* ============ ПОИСК В ИНТЕРНЕТЕ (DuckDuckGo + Groq) ============ */
+/* ============ ПОИСК В ИНТЕРНЕТЕ ============ */
 app.post('/api/search', async (req, res) => {
   try {
     const { query } = req.body;
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
 
-    // Шаг 1: ищем в DuckDuckGo (бесплатно, без ключа)
     let webContext = '';
     try {
       const ddgRes = await fetch(
@@ -83,7 +82,6 @@ app.post('/api/search', async (req, res) => {
       webContext = 'Не удалось получить данные из поиска.';
     }
 
-    // Шаг 2: передаём в Groq, чтобы он сделал нормальный ответ
     const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -97,8 +95,7 @@ app.post('/api/search', async (req, res) => {
             role: 'system',
             content: `Ты — Novus_Куёвус с доступом к свежим данным из интернета.
 Тебе дают результаты поиска — сформируй на их основе ответ пользователю.
-Пиши кратко (до 5 абзацев), по делу. Если данных мало — честно скажи об этом.
-Не выдумывай факты, которых нет в предоставленных данных.`
+Пиши кратко (до 5 абзацев), по делу. Если данных мало — честно скажи об этом.`
           },
           {
             role: 'user',
@@ -113,10 +110,7 @@ app.post('/api/search', async (req, res) => {
     const aiData = await aiRes.json();
     if (!aiRes.ok) return res.status(500).json({ error: aiData.error?.message || 'Ошибка Groq' });
 
-    res.json({
-      reply: aiData.choices[0].message.content,
-      sources: webContext
-    });
+    res.json({ reply: aiData.choices[0].message.content });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
   }
