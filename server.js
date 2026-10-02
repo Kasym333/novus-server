@@ -68,7 +68,6 @@ app.post('/api/search', async (req, res) => {
         'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1&skip_disambig=1'
       );
       const ddgData = await ddgRes.json();
-
       const parts = [];
       if (ddgData.AbstractText) parts.push('Кратко: ' + ddgData.AbstractText);
       if (ddgData.Answer) parts.push('Ответ: ' + ddgData.Answer);
@@ -95,7 +94,7 @@ app.post('/api/search', async (req, res) => {
             role: 'system',
             content: `Ты — Novus_Куёвус с доступом к свежим данным из интернета.
 Тебе дают результаты поиска — сформируй на их основе ответ пользователю.
-Пиши кратко (до 5 абзацев), по делу. Если данных мало — честно скажи об этом.`
+Пиши кратко, по делу. Если данных мало — честно скажи.`
           },
           {
             role: 'user',
@@ -109,10 +108,55 @@ app.post('/api/search', async (req, res) => {
 
     const aiData = await aiRes.json();
     if (!aiRes.ok) return res.status(500).json({ error: aiData.error?.message || 'Ошибка Groq' });
-
     res.json({ reply: aiData.choices[0].message.content });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
+  }
+});
+
+/* ============ ПЕРЕВОД ПРОМПТА ДЛЯ КАРТИНОК ============ */
+app.post('/api/translate', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!prompt) return res.status(400).json({ error: 'Пустой промпт' });
+
+    const aiRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-120b',
+        messages: [
+          {
+            role: 'system',
+            content: `Ты — переводчик промптов для AI-генератора картинок.
+Твоя задача: превратить запрос пользователя (на любом языке) в короткий, ёмкий английский промпт для Stable Diffusion / Flux.
+ПРАВИЛА:
+1. Отвечай ТОЛЬКО английским текстом промпта. Без кавычек, без объяснений.
+2. Максимум 15-20 слов.
+3. Добавляй детали: стиль, освещение, качество (например: "cinematic lighting, highly detailed, 8k").
+4. Если это названия игр/фильмов/брендов — оставляй их правильно на английском (FNAF, Minecraft, etc).
+5. Если запрос бессмысленный — сделай разумный арт-промпт по нему.`
+          },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.4,
+        max_tokens: 100
+      })
+    });
+
+    const aiData = await aiRes.json();
+    if (!aiRes.ok) return res.status(500).json({ error: aiData.error?.message || 'Ошибка Groq' });
+
+    let englishPrompt = aiData.choices[0].message.content.trim();
+    // Убираем возможные кавычки
+    englishPrompt = englishPrompt.replace(/^["']|["']$/g, '');
+
+    res.json({ englishPrompt });
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка перевода: ' + e.message });
   }
 });
 
