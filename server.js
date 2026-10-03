@@ -11,7 +11,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код. Держи контекст беседы.`;
+const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код. Держи контекст беседы. Если у тебя есть доступ к поиску в интернете — используй его для свежих данных.`;
 
 /* ============ GROQ ============ */
 async function callGroq(messages, temp, maxT, model) {
@@ -33,8 +33,8 @@ async function callGroq(messages, temp, maxT, model) {
   return data.choices[0].message.content;
 }
 
-/* ============ GEMINI ============ */
-async function callGemini(messages, temp, maxT) {
+/* ============ GEMINI С ПОИСКОМ GOOGLE ============ */
+async function callGemini(messages, temp, maxT, useSearch) {
   const systemMsg = messages.find(function(m) { return m.role === 'system'; });
   const chatMsgs = messages.filter(function(m) { return m.role !== 'system'; });
 
@@ -57,6 +57,11 @@ async function callGemini(messages, temp, maxT) {
     body.systemInstruction = { parts: [{ text: systemMsg.content }] };
   }
 
+  // 🌐 ПОИСК GOOGLE — включён по умолчанию
+  if (useSearch !== false) {
+    body.tools = [{ googleSearch: {} }];
+  }
+
   const res = await fetch(
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + process.env.GEMINI_API_KEY,
     {
@@ -68,7 +73,15 @@ async function callGemini(messages, temp, maxT) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ? data.error.message : 'Gemini error');
   if (!data.candidates || !data.candidates[0]) throw new Error('Gemini: пустой ответ');
-  return data.candidates[0].content.parts[0].text;
+
+  // Извлекаем текст
+  let text = '';
+  try {
+    text = data.candidates[0].content.parts.map(function(p) { return p.text || ''; }).join('');
+  } catch (e) {
+    throw new Error('Gemini: ошибка парсинга');
+  }
+  return text;
 }
 
 /* ============ OPENROUTER ============ */
@@ -100,19 +113,19 @@ async function callOpenRouter(messages, temp, maxT) {
   throw new Error('OpenRouter failed');
 }
 
-/* ============ РОУТЕР: выбор провайдера ============ */
-async function smartChat(messages, temp, maxT, model) {
-  // 🎯 Пользователь выбрал конкретную модель
+/* ============ РОУТЕР ============ */
+async function smartChat(messages, temp, maxT, model, useSearch) {
+  // Gemini выбран вручную
   if (model === 'gemini') {
-    console.log('🎯 Выбрана модель: Gemini');
-    return { reply: await callGemini(messages, temp, maxT), provider: 'Gemini' };
+    console.log('🎯 Выбрана модель: Gemini (поиск: ' + (useSearch !== false) + ')');
+    return { reply: await callGemini(messages, temp, maxT, useSearch), provider: 'Gemini' };
   }
+  // OpenRouter выбран вручную
   if (model === 'openrouter') {
     console.log('🎯 Выбрана модель: OpenRouter');
     return { reply: await callOpenRouter(messages, temp, maxT), provider: 'OpenRouter' };
   }
-
-  // Groq с указанной моделью
+  // Конкретная модель Groq
   if (model && model !== 'auto') {
     try {
       console.log('🎯 Выбрана модель Groq: ' + model);
@@ -125,7 +138,7 @@ async function smartChat(messages, temp, maxT, model) {
   // 🌊 АВТО-КАСКАД: Groq → Gemini → OpenRouter
   const cascade = [
     { name: 'Groq', fn: function() { return callGroq(messages, temp, maxT); } },
-    { name: 'Gemini', fn: function() { return callGemini(messages, temp, maxT); } },
+    { name: 'Gemini', fn: function() { return callGemini(messages, temp, maxT, useSearch); } },
     { name: 'OpenRouter', fn: function() { return callOpenRouter(messages, temp, maxT); } }
   ];
 
@@ -143,7 +156,7 @@ async function smartChat(messages, temp, maxT, model) {
   throw lastError || new Error('Все ИИ недоступны');
 }
 
-/* ============ ЧАТ С ПАМЯТЬЮ ============ */
+/* ============ ЧАТ ============ */
 app.post('/api/chat', async (req, res) => {
   try {
     const body = req.body || {};
@@ -162,7 +175,6 @@ app.post('/api/chat', async (req, res) => {
     const hint = nickname ? ('\nПользователя зовут ' + nickname + '.') : '';
     const messages = [{ role: 'system', content: prompt + hint }];
 
-    // 🧠 ИСТОРИЯ
     if (Array.isArray(history)) {
       history.forEach(function(h) {
         if (h && h.role && h.content) {
@@ -171,7 +183,7 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // 🖼 Фото — только через Groq Vision
+    // Фото — через Groq Vision
     if (image) {
       messages.push({
         role: 'user',
@@ -200,7 +212,11 @@ app.post('/api/chat', async (req, res) => {
 
     messages.push({ role: 'user', content: message });
 
-    const result = await smartChat(messages, temperature, maxTokens, model);
+    // Проверяем, нужен ли поиск (если модель Gemini — всегда да)
+    const lower = message.toLowerCase();
+    const needsSearch = /(найди|поищи|погугли|новости|последни|свежи|актуальн|today|latest|news)/i.test(lower);
+
+    const result = await smartChat(messages, temperature, maxTokens, model, needsSearch || model === 'gemini');
     res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка: ' + e.message });
@@ -214,6 +230,19 @@ app.post('/api/search', async (req, res) => {
     const query = body.query;
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
 
+    // 🌐 Сначала пробуем Gemini с Google-поиском
+    try {
+      const geminiMessages = [
+        { role: 'system', content: 'Ты — Novus. Найди информацию в интернете и ответь кратко на русском.' },
+        { role: 'user', content: query }
+      ];
+      const geminiReply = await callGemini(geminiMessages, 0.3, 1500, true);
+      return res.json({ reply: geminiReply, provider: 'Gemini Search' });
+    } catch (e) {
+      console.warn('Gemini Search упал: ' + e.message);
+    }
+
+    // Резерв: DuckDuckGo + Groq
     let webContext = '';
     try {
       const ddgRes = await fetch('https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1&skip_disambig=1');
@@ -230,8 +259,8 @@ app.post('/api/search', async (req, res) => {
       { role: 'system', content: 'Ты — Novus. Отвечай на основе данных поиска, кратко.' },
       { role: 'user', content: 'Запрос: ' + query + '\n\nДанные: ' + webContext }
     ];
-    const result = await smartChat(messages, 0.3, 1500, 'auto');
-    res.json({ reply: result.reply });
+    const result = await smartChat(messages, 0.3, 1500, 'auto', false);
+    res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
   }
@@ -248,7 +277,7 @@ app.post('/api/translate', async (req, res) => {
       { role: 'system', content: 'You translate requests into English prompts for AI image generators. Reply ONLY with the English prompt, up to 40 words. Add: highly detailed, cinematic lighting, 8k, masterpiece.' },
       { role: 'user', content: prompt }
     ];
-    const result = await smartChat(messages, 0.5, 200, 'auto');
+    const result = await smartChat(messages, 0.5, 200, 'auto', false);
     const cleaned = result.reply.trim().replace(/^["']|["']$/g, '');
     res.json({ englishPrompt: cleaned });
   } catch (e) {
