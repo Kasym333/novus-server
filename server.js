@@ -11,22 +11,39 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент, свободно говоришь на русском языке.
+function systemPrompt(lang) {
+  if (lang === 'en') {
+    return `You are Novus, a smart and friendly assistant.
+
+LANGUAGE:
+- Reply in English, correct and natural.
+- If user writes in another language — reply in same language.
+- Understand slang, typos, abbreviations.
+- Do not ask obvious things.
+
+RULES:
+1. Be brief and to the point.
+2. Give working code with short explanations.
+3. If you don't know — say honestly.
+4. No moral lectures without reason.
+5. Keep conversation context.`;
+  }
+  return `Ты — Novus, умный и дружелюбный ассистент.
 
 ЯЗЫК И ПОНИМАНИЕ:
-- Пиши грамотным, живым русским языком, без ошибок и кальки с английского.
-- Понимаешь сленг, мат, опечатки, сокращения и разговорную речь. Если пользователь написал с ошибками — пойми суть и ответь нормально.
+- Пиши грамотным, живым русским языком.
+- Понимаешь сленг, мат, опечатки, сокращения.
 - Понимаешь украинский, белорусский, английский — отвечай на языке пользователя.
-- Не переспрашивай очевидное. Если смысл ясен — отвечай.
-- Знай реалии: историю, культуру, быт, мемы, интернет-сленг русскоязычного мира.
+- Не переспрашивай очевидное.
+- Знай реалии русскоязычного мира.
 
 ПРАВИЛА:
 1. Отвечай по делу, без воды.
-2. Если просят код — давай рабочий код с кратким пояснением.
-3. Если не знаешь — честно скажи, не выдумывай.
+2. Если просят код — давай рабочий код.
+3. Если не знаешь — честно скажи.
 4. Не читай морали без причины.
-5. Держи контекст беседы.
-6. Будь вежливым, но без подхалимства.`;
+5. Держи контекст беседы.`;
+}
 
 const ALLOWED_MODELS = [
   'openai/gpt-oss-120b',
@@ -39,8 +56,7 @@ const ALLOWED_MODELS = [
 const OPENROUTER_FALLBACK = [
   'deepseek/deepseek-r1:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'google/gemini-2.0-flash-exp:free',
-  'qwen/qwen3-coder:free'
+  'google/gemini-2.0-flash-exp:free'
 ];
 
 function pickModel(requested) {
@@ -82,17 +98,15 @@ async function callOpenRouter(messages, temperature, maxTokens) {
           'X-Title': 'Novus'
         },
         body: JSON.stringify({
-          model: model,
-          messages: messages,
-          temperature: temperature ?? 0.6,
-          max_tokens: maxTokens ?? 2048
+          model: model, messages: messages,
+          temperature: temperature ?? 0.6, max_tokens: maxTokens ?? 2048
         })
       });
       const data = await res.json();
       if (res.ok) return data.choices[0].message.content;
     } catch (e) {}
   }
-  throw new Error('OpenRouter недоступен');
+  throw new Error('OpenRouter failed');
 }
 
 app.post('/api/chat', async (req, res) => {
@@ -105,18 +119,19 @@ app.post('/api/chat', async (req, res) => {
     const temperature = body.temperature;
     const maxTokens = body.maxTokens;
     const image = body.image;
+    const lang = body.lang || 'ru';
 
-    if (!message && !image) return res.status(400).json({ error: 'Пустое сообщение' });
+    if (!message && !image) return res.status(400).json({ error: 'Empty' });
 
-    const basePrompt = customPrompt || DEFAULT_PROMPT;
-    const hint = nickname ? ('\nПользователя зовут ' + nickname + '.') : '';
+    const basePrompt = customPrompt || systemPrompt(lang);
+    const hint = nickname ? ('\nName: ' + nickname + '.') : '';
     const messages = [{ role: 'system', content: basePrompt + hint }];
 
     if (image) {
       messages.push({
         role: 'user',
         content: [
-          { type: 'text', text: message || 'Опиши изображение подробно' },
+          { type: 'text', text: message || 'Describe this image' },
           { type: 'image_url', image_url: { url: image } }
         ]
       });
@@ -129,8 +144,7 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify({
           model: 'meta-llama/llama-4-scout-17b-16e-instruct',
           messages: messages,
-          temperature: 0.5,
-          max_tokens: 1024
+          temperature: 0.5, max_tokens: 1024
         })
       });
       const vData = await vRes.json();
@@ -144,12 +158,12 @@ app.post('/api/chat', async (req, res) => {
     try {
       reply = await callGroq(messages, temperature, maxTokens, model, true);
     } catch (e) {
-      console.warn('Groq не сработал:', e.message);
+      console.warn('Groq failed:', e.message);
       reply = await callOpenRouter(messages, temperature, maxTokens);
     }
     res.json({ reply: reply, model: model });
   } catch (e) {
-    res.status(500).json({ error: 'Ошибка: ' + e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -157,7 +171,8 @@ app.post('/api/search', async (req, res) => {
   try {
     const body = req.body || {};
     const query = body.query;
-    if (!query) return res.status(400).json({ error: 'Пустой запрос' });
+    const lang = body.lang || 'ru';
+    if (!query) return res.status(400).json({ error: 'Empty' });
 
     let webContext = '';
     try {
@@ -170,19 +185,21 @@ app.post('/api/search', async (req, res) => {
           if (t.Text) parts.push(t.Text);
         });
       }
-      webContext = parts.join(' ') || 'Нет данных';
-    } catch (e) {
-      webContext = 'Ошибка поиска';
-    }
+      webContext = parts.join(' ') || 'No data';
+    } catch (e) { webContext = 'Search error'; }
+
+    const sysMsg = lang === 'en'
+      ? 'You are Novus. Answer in English based on search results. Brief and clear.'
+      : 'Ты — Novus. Отвечай на русском на основе данных поиска. Кратко, по делу.';
 
     const messages = [
-      { role: 'system', content: 'Ты — Novus. Отвечай на русском на основе данных поиска. Кратко, по делу.' },
-      { role: 'user', content: 'Запрос: ' + query + '\n\nДанные: ' + webContext }
+      { role: 'system', content: sysMsg },
+      { role: 'user', content: 'Query: ' + query + '\n\nData: ' + webContext }
     ];
     const reply = await callGroq(messages, 0.3, 1500, 'openai/gpt-oss-120b', false);
     res.json({ reply: reply });
   } catch (e) {
-    res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -190,20 +207,20 @@ app.post('/api/translate', async (req, res) => {
   try {
     const body = req.body || {};
     const prompt = body.prompt;
-    if (!prompt) return res.status(400).json({ error: 'Пустой промпт' });
+    if (!prompt) return res.status(400).json({ error: 'Empty' });
 
     const messages = [
-      { role: 'system', content: 'Ты переводишь запросы в английские промпты для AI-генераторов. Отвечай ТОЛЬКО английским текстом промпта, до 40 слов. Добавляй: highly detailed, cinematic lighting, 8k, masterpiece.' },
+      { role: 'system', content: 'You translate requests into English prompts for AI image generators. Reply ONLY with the English prompt text, up to 40 words. Add: highly detailed, cinematic lighting, 8k, masterpiece.' },
       { role: 'user', content: prompt }
     ];
     const reply = await callGroq(messages, 0.5, 200, 'openai/gpt-oss-120b', false);
     const cleaned = reply.trim().replace(/^["']|["']$/g, '');
     res.json({ englishPrompt: cleaned });
   } catch (e) {
-    res.status(500).json({ error: 'Ошибка перевода: ' + e.message });
+    res.status(500).json({ error: e.message });
   }
 });
 
 app.listen(PORT, function() {
-  console.log('Сервер запущен на порту ' + PORT);
+  console.log('Server started on port ' + PORT);
 });
