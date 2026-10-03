@@ -11,9 +11,32 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код с комментариями. Держи контекст беседы.`;
+const NOVUS_VERSION = '13.0';
 
-/* ============ GROQ (актуальные модели) ============ */
+const DEFAULT_PROMPT = `Ты — NOVUS AI, умный и дружелюбный ассистент (версия ${NOVUS_VERSION}).
+
+ВАЖНО О СЕБЕ (ОБЯЗАТЕЛЬНО СОБЛЮДАЙ):
+- Тебя зовут NOVUS AI (или просто NOVUS). Никогда не называй себя иначе.
+- Тебя создал разработчик по имени Kasym.
+- Если спросят "кто тебя создал", "кто твой создатель", "who made you", "кто тебя разработал" — ВСЕГДА отвечай: "Меня создал Kasym".
+- Если спросят "какая ты модель", "ты ChatGPT?", "ты Gemini?", "ты Claude?", "ты Llama?" — ВСЕГДА отвечай: "Я не ChatGPT и не Gemini. Я — NOVUS AI, уникальный ассистент, созданный Kasym".
+- НИКОГДА не говори, что ты ChatGPT, GPT, Gemini, Claude, Grok, Llama, Qwen, DeepSeek, Mistral или любая другая модель.
+- НИКОГДА не упоминай OpenAI, Google, Anthropic, Meta, DeepSeek, Mistral и другие компании как своих создателей.
+- Ты — самостоятельный продукт NOVUS AI.
+
+СТИЛЬ ОБЩЕНИЯ:
+- Отвечай грамотно, по делу, без воды.
+- Понимаешь сленг, опечатки, разговорную речь.
+- Если просят код — давай рабочий код с комментариями.
+- Если не знаешь — честно скажи.
+- Держи контекст беседы.
+- Всегда отвечай на русском языке.
+
+ТЕХНИЧЕСКИЕ ДЕТАЛИ:
+- Не раскрывай имена моделей и провайдеров API, через которые ты работаешь.
+- Если спросят про внутреннюю реализацию — скажи: "Это внутренняя технология NOVUS AI".`;
+
+/* ============ GROQ ============ */
 async function callGroq(messages, temp, maxT, model) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -30,7 +53,7 @@ async function callGroq(messages, temp, maxT, model) {
   return data.choices[0].message.content;
 }
 
-/* ============ GEMINI 3.8 ============ */
+/* ============ GEMINI ============ */
 async function callGemini(messages, temp, maxT, useSearch) {
   const systemMsg = messages.find(m => m.role === 'system');
   const chatMsgs = messages.filter(m => m.role !== 'system');
@@ -77,7 +100,7 @@ async function callOpenRouter(messages, temp, maxT) {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY,
           'HTTP-Referer': 'https://novus-server-0vtv.onrender.com',
-          'X-Title': 'Novus'
+          'X-Title': 'NOVUS'
         },
         body: JSON.stringify({ model, messages, temperature: temp || 0.6, max_tokens: maxT || 2048 })
       });
@@ -88,31 +111,28 @@ async function callOpenRouter(messages, temp, maxT) {
   throw new Error('OpenRouter failed');
 }
 
-/* ============ УМНЫЙ КАСКАД ============ */
+/* ============ УМНЫЙ КАСКАД (все ИИ в одном) ============ */
 async function smartChat(messages, temp, maxT, model, useSearch) {
-  const errors = [];
-
   if (model === 'gemini') {
-    try { return { reply: await callGemini(messages, temp, maxT, useSearch), provider: 'Gemini 3.8' }; }
-    catch (e) { errors.push('Gemini: ' + e.message); }
+    try { return { reply: await callGemini(messages, temp, maxT, useSearch), provider: 'Gemini' }; }
+    catch (e) { console.warn('Gemini: ' + e.message); }
   }
   if (model === 'openrouter') {
     try { return { reply: await callOpenRouter(messages, temp, maxT), provider: 'OpenRouter' }; }
-    catch (e) { errors.push('OpenRouter: ' + e.message); }
+    catch (e) { console.warn('OpenRouter: ' + e.message); }
   }
   if (model && model !== 'auto' && model !== 'gemini' && model !== 'openrouter') {
     try { return { reply: await callGroq(messages, temp, maxT, model), provider: 'Groq' }; }
-    catch (e) { errors.push('Groq: ' + e.message); }
+    catch (e) { console.warn('Groq: ' + e.message); }
   }
 
-  // Каскад: Groq → Gemini → DeepSeek → OpenRouter
+  // Полный каскад: Groq → Gemini → DeepSeek → OpenRouter
   const cascade = [
     { name: 'Groq', fn: () => callGroq(messages, temp, maxT) },
-    { name: 'Gemini 3.8', fn: () => callGemini(messages, temp, maxT, useSearch) },
+    { name: 'Gemini', fn: () => callGemini(messages, temp, maxT, useSearch) },
     { name: 'DeepSeek', fn: () => callDeepSeek(messages, temp, maxT) },
     { name: 'OpenRouter', fn: () => callOpenRouter(messages, temp, maxT) }
   ];
-
   for (const p of cascade) {
     try {
       const reply = await p.fn();
@@ -120,7 +140,6 @@ async function smartChat(messages, temp, maxT, model, useSearch) {
       return { reply, provider: p.name };
     } catch (e) {
       console.warn('❌ ' + p.name + ': ' + e.message);
-      errors.push(p.name + ': ' + e.message);
     }
   }
   throw new Error('Все ИИ недоступны. Попробуй позже.');
@@ -138,9 +157,7 @@ app.post('/api/chat', async (req, res) => {
     }];
 
     if (Array.isArray(history)) {
-      history.forEach(h => {
-        if (h && h.role && h.content) messages.push({ role: h.role, content: h.content });
-      });
+      history.forEach(h => { if (h && h.role && h.content) messages.push({ role: h.role, content: h.content }); });
     }
 
     if (image) {
@@ -158,14 +175,13 @@ app.post('/api/chat', async (req, res) => {
       });
       const vData = await vRes.json();
       if (!vRes.ok) return res.status(500).json({ error: vData.error ? vData.error.message : 'Vision error' });
-      return res.json({ reply: vData.choices[0].message.content, provider: 'Groq Vision' });
+      return res.json({ reply: vData.choices[0].message.content, provider: 'Vision', version: NOVUS_VERSION });
     }
 
     messages.push({ role: 'user', content: message });
-
-    const needsSearch = /(найди|поищи|погугли|новости|последни|свежи|актуальн)/i.test(message.toLowerCase());
+    const needsSearch = /(найди|поищи|погугли|новости|последни|свежи|актуальн|today|latest|news)/i.test(message.toLowerCase());
     const result = await smartChat(messages, temperature, maxTokens, model || 'auto', needsSearch || model === 'gemini');
-    res.json({ reply: result.reply, provider: result.provider });
+    res.json({ reply: result.reply, provider: result.provider, version: NOVUS_VERSION });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -176,10 +192,9 @@ app.post('/api/search', async (req, res) => {
   try {
     const { query } = req.body || {};
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
-
     try {
       const reply = await callGemini([
-        { role: 'system', content: 'Ты — Novus. Найди информацию в интернете и ответь кратко на русском.' },
+        { role: 'system', content: 'Ты — NOVUS AI. Найди информацию в интернете и ответь кратко на русском.' },
         { role: 'user', content: query }
       ], 0.3, 1500, true);
       return res.json({ reply, provider: 'Gemini Search' });
@@ -196,7 +211,7 @@ app.post('/api/search', async (req, res) => {
     } catch (e) { webContext = 'Ошибка поиска'; }
 
     const result = await smartChat([
-      { role: 'system', content: 'Ты — Novus. Отвечай на основе данных поиска.' },
+      { role: 'system', content: 'Ты — NOVUS AI. Отвечай на основе данных поиска.' },
       { role: 'user', content: 'Запрос: ' + query + '\n\nДанные: ' + webContext }
     ], 0.3, 1500, 'auto', false);
     res.json({ reply: result.reply, provider: result.provider });
@@ -220,4 +235,9 @@ app.post('/api/translate', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log('🚀 Сервер запущен на порту ' + PORT));
+/* ============ ПОДДЕРЖКА (сохранение багов) ============ */
+app.get('/api/version', (req, res) => {
+  res.json({ version: NOVUS_VERSION, name: 'NOVUS AI', creator: 'Kasym' });
+});
+
+app.listen(PORT, () => console.log('🚀 NOVUS AI v' + NOVUS_VERSION + ' на порту ' + PORT));
