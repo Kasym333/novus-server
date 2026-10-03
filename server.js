@@ -11,10 +11,10 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный ассистент. Отвечай грамотно, по делу. Понимаешь сленг, опечатки. Если просят код — давай рабочий код. Держи контекст беседы.`;
+const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код. Держи контекст беседы.`;
 
 /* ============ GROQ ============ */
-async function callGroq(messages, temp, maxT) {
+async function callGroq(messages, temp, maxT, model) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -22,7 +22,7 @@ async function callGroq(messages, temp, maxT) {
       'Authorization': 'Bearer ' + process.env.GROQ_API_KEY
     },
     body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
+      model: model || 'openai/gpt-oss-120b',
       messages: messages,
       temperature: temp || 0.6,
       max_tokens: maxT || 2048
@@ -67,30 +67,11 @@ async function callGemini(messages, temp, maxT) {
   );
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ? data.error.message : 'Gemini error');
+  if (!data.candidates || !data.candidates[0]) throw new Error('Gemini: пустой ответ');
   return data.candidates[0].content.parts[0].text;
 }
 
-/* ============ DEEPSEEK ============ */
-async function callDeepSeek(messages, temp, maxT) {
-  const res = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + process.env.DEEPSEEK_API_KEY
-    },
-    body: JSON.stringify({
-      model: 'deepseek-chat',
-      messages: messages,
-      temperature: temp || 0.6,
-      max_tokens: maxT || 2048
-    })
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error ? data.error.message : 'DeepSeek error');
-  return data.choices[0].message.content;
-}
-
-/* ============ OPENROUTER (резерв) ============ */
+/* ============ OPENROUTER ============ */
 async function callOpenRouter(messages, temp, maxT) {
   const models = [
     'deepseek/deepseek-r1:free',
@@ -119,17 +100,37 @@ async function callOpenRouter(messages, temp, maxT) {
   throw new Error('OpenRouter failed');
 }
 
-/* ============ КАСКАД: Groq → Gemini → DeepSeek → OpenRouter ============ */
-async function smartChat(messages, temp, maxT) {
-  const providers = [
+/* ============ РОУТЕР: выбор провайдера ============ */
+async function smartChat(messages, temp, maxT, model) {
+  // 🎯 Пользователь выбрал конкретную модель
+  if (model === 'gemini') {
+    console.log('🎯 Выбрана модель: Gemini');
+    return { reply: await callGemini(messages, temp, maxT), provider: 'Gemini' };
+  }
+  if (model === 'openrouter') {
+    console.log('🎯 Выбрана модель: OpenRouter');
+    return { reply: await callOpenRouter(messages, temp, maxT), provider: 'OpenRouter' };
+  }
+
+  // Groq с указанной моделью
+  if (model && model !== 'auto') {
+    try {
+      console.log('🎯 Выбрана модель Groq: ' + model);
+      return { reply: await callGroq(messages, temp, maxT, model), provider: 'Groq' };
+    } catch (e) {
+      console.warn('Groq не сработал: ' + e.message);
+    }
+  }
+
+  // 🌊 АВТО-КАСКАД: Groq → Gemini → OpenRouter
+  const cascade = [
     { name: 'Groq', fn: function() { return callGroq(messages, temp, maxT); } },
     { name: 'Gemini', fn: function() { return callGemini(messages, temp, maxT); } },
-    { name: 'DeepSeek', fn: function() { return callDeepSeek(messages, temp, maxT); } },
     { name: 'OpenRouter', fn: function() { return callOpenRouter(messages, temp, maxT); } }
   ];
 
   let lastError = null;
-  for (const p of providers) {
+  for (const p of cascade) {
     try {
       const reply = await p.fn();
       console.log('✅ Ответ от: ' + p.name);
@@ -153,6 +154,7 @@ app.post('/api/chat', async (req, res) => {
     const maxTokens = body.maxTokens;
     const history = body.history;
     const image = body.image;
+    const model = body.model || 'auto';
 
     if (!message && !image) return res.status(400).json({ error: 'Пустое сообщение' });
 
@@ -160,7 +162,7 @@ app.post('/api/chat', async (req, res) => {
     const hint = nickname ? ('\nПользователя зовут ' + nickname + '.') : '';
     const messages = [{ role: 'system', content: prompt + hint }];
 
-    // 🧠 ДОБАВЛЯЕМ ИСТОРИЮ
+    // 🧠 ИСТОРИЯ
     if (Array.isArray(history)) {
       history.forEach(function(h) {
         if (h && h.role && h.content) {
@@ -169,7 +171,7 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // 🖼 Если фото — используем vision
+    // 🖼 Фото — только через Groq Vision
     if (image) {
       messages.push({
         role: 'user',
@@ -198,7 +200,7 @@ app.post('/api/chat', async (req, res) => {
 
     messages.push({ role: 'user', content: message });
 
-    const result = await smartChat(messages, temperature, maxTokens);
+    const result = await smartChat(messages, temperature, maxTokens, model);
     res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка: ' + e.message });
@@ -228,7 +230,7 @@ app.post('/api/search', async (req, res) => {
       { role: 'system', content: 'Ты — Novus. Отвечай на основе данных поиска, кратко.' },
       { role: 'user', content: 'Запрос: ' + query + '\n\nДанные: ' + webContext }
     ];
-    const result = await smartChat(messages, 0.3, 1500);
+    const result = await smartChat(messages, 0.3, 1500, 'auto');
     res.json({ reply: result.reply });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка поиска: ' + e.message });
@@ -246,7 +248,7 @@ app.post('/api/translate', async (req, res) => {
       { role: 'system', content: 'You translate requests into English prompts for AI image generators. Reply ONLY with the English prompt, up to 40 words. Add: highly detailed, cinematic lighting, 8k, masterpiece.' },
       { role: 'user', content: prompt }
     ];
-    const result = await smartChat(messages, 0.5, 200);
+    const result = await smartChat(messages, 0.5, 200, 'auto');
     const cleaned = result.reply.trim().replace(/^["']|["']$/g, '');
     res.json({ englishPrompt: cleaned });
   } catch (e) {
