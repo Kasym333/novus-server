@@ -33,11 +33,8 @@ const DEFAULT_PROMPT = `Ты — NOVUS AI, ассистент версии ${NOV
 async function fetchTimeout(url, opts, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
-  try {
-    return await fetch(url, { ...opts, signal: ctrl.signal });
-  } finally {
-    clearTimeout(t);
-  }
+  try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+  finally { clearTimeout(t); }
 }
 
 async function callGroq(messages, temp, maxT, model) {
@@ -143,7 +140,6 @@ async function smartChat(messages, temp, maxT, model, useSearch) {
 
 async function fastWebSearch(query) {
   const results = [];
-
   try {
     const r = await fetchTimeout(
       'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1&skip_disambig=1',
@@ -175,7 +171,6 @@ async function fastWebSearch(query) {
       });
     } catch (e) {}
   }
-
   return results.join('\n').slice(0, 2500) || '';
 }
 
