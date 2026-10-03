@@ -11,20 +11,49 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = 'Ты — Novus_Куёвус, senior-разработчик и эксперт по всем языкам программирования. Отвечай кратко, по делу. Давай рабочий код с комментариями. Пиши на русском, код — на английском.';
+const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент, свободно говоришь на русском языке.
 
-const OPENROUTER_FREE_MODELS = [
+ЯЗЫК И ПОНИМАНИЕ:
+- Пиши грамотным, живым русским языком, без ошибок и кальки с английского.
+- Понимаешь сленг, мат, опечатки, сокращения и разговорную речь. Если пользователь написал с ошибками — пойми суть и ответь нормально.
+- Понимаешь украинский, белорусский, английский — отвечай на языке пользователя.
+- Не переспрашивай очевидное. Если смысл ясен — отвечай.
+- Знай реалии: историю, культуру, быт, мемы, интернет-сленг русскоязычного мира.
+
+ПРАВИЛА:
+1. Отвечай по делу, без воды.
+2. Если просят код — давай рабочий код с кратким пояснением.
+3. Если не знаешь — честно скажи, не выдумывай.
+4. Не читай морали без причины.
+5. Держи контекст беседы.
+6. Будь вежливым, но без подхалимства.`;
+
+const ALLOWED_MODELS = [
+  'openai/gpt-oss-120b',
+  'meta-llama/llama-4-scout-17b-16e-instruct',
+  'meta-llama/llama-4-maverick-17b-128e-instruct',
+  'qwen/qwen3-32b',
+  'moonshotai/kimi-k2-instruct'
+];
+
+const OPENROUTER_FALLBACK = [
   'deepseek/deepseek-r1:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'google/gemini-2.0-flash-exp:free'
+  'google/gemini-2.0-flash-exp:free',
+  'qwen/qwen3-coder:free'
 ];
+
+function pickModel(requested) {
+  if (requested && ALLOWED_MODELS.includes(requested)) return requested;
+  return 'openai/gpt-oss-120b';
+}
 
 async function callGroq(messages, temperature, maxTokens, model, useSearch) {
   const body = {
-    model: model || 'openai/gpt-oss-120b',
+    model: model,
     messages: messages,
-    temperature: temperature || 0.5,
-    max_tokens: maxTokens || 2048
+    temperature: temperature ?? 0.6,
+    max_tokens: maxTokens ?? 2048
   };
   if (useSearch) body.tools = [{ type: 'browser_search' }];
 
@@ -42,7 +71,7 @@ async function callGroq(messages, temperature, maxTokens, model, useSearch) {
 }
 
 async function callOpenRouter(messages, temperature, maxTokens) {
-  for (const model of OPENROUTER_FREE_MODELS) {
+  for (const model of OPENROUTER_FALLBACK) {
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
@@ -50,13 +79,13 @@ async function callOpenRouter(messages, temperature, maxTokens) {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY,
           'HTTP-Referer': 'https://novus-server-0vtv.onrender.com',
-          'X-Title': 'Novus_Kuevus'
+          'X-Title': 'Novus'
         },
         body: JSON.stringify({
           model: model,
           messages: messages,
-          temperature: temperature || 0.5,
-          max_tokens: maxTokens || 2048
+          temperature: temperature ?? 0.6,
+          max_tokens: maxTokens ?? 2048
         })
       });
       const data = await res.json();
@@ -72,7 +101,7 @@ app.post('/api/chat', async (req, res) => {
     const message = body.message;
     const nickname = body.nickname;
     const customPrompt = body.customPrompt;
-    const model = body.model;
+    const model = pickModel(body.model);
     const temperature = body.temperature;
     const maxTokens = body.maxTokens;
     const image = body.image;
@@ -83,12 +112,11 @@ app.post('/api/chat', async (req, res) => {
     const hint = nickname ? ('\nПользователя зовут ' + nickname + '.') : '';
     const messages = [{ role: 'system', content: basePrompt + hint }];
 
-    // Фото → vision
     if (image) {
       messages.push({
         role: 'user',
         content: [
-          { type: 'text', text: message || 'Опиши изображение' },
+          { type: 'text', text: message || 'Опиши изображение подробно' },
           { type: 'image_url', image_url: { url: image } }
         ]
       });
@@ -116,10 +144,10 @@ app.post('/api/chat', async (req, res) => {
     try {
       reply = await callGroq(messages, temperature, maxTokens, model, true);
     } catch (e) {
-      console.warn('Groq упал:', e.message);
+      console.warn('Groq не сработал:', e.message);
       reply = await callOpenRouter(messages, temperature, maxTokens);
     }
-    res.json({ reply: reply });
+    res.json({ reply: reply, model: model });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка: ' + e.message });
   }
@@ -148,7 +176,7 @@ app.post('/api/search', async (req, res) => {
     }
 
     const messages = [
-      { role: 'system', content: 'Ты — Novus_Куёвус. Отвечай на основе данных поиска, кратко.' },
+      { role: 'system', content: 'Ты — Novus. Отвечай на русском на основе данных поиска. Кратко, по делу.' },
       { role: 'user', content: 'Запрос: ' + query + '\n\nДанные: ' + webContext }
     ];
     const reply = await callGroq(messages, 0.3, 1500, 'openai/gpt-oss-120b', false);
