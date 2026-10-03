@@ -11,7 +11,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код. Держи контекст беседы. Если у тебя есть доступ к поиску в интернете — используй его для свежих данных.`;
+const DEFAULT_PROMPT = `Ты — Novus, умный и дружелюбный ассистент. Отвечай грамотно, по делу, без воды. Понимаешь сленг и опечатки. Если просят код — давай рабочий код. Держи контекст беседы. Если есть доступ к поиску — используй для свежих данных.`;
 
 /* ============ GROQ ============ */
 async function callGroq(messages, temp, maxT, model) {
@@ -57,24 +57,22 @@ async function callGemini(messages, temp, maxT, useSearch) {
     body.systemInstruction = { parts: [{ text: systemMsg.content }] };
   }
 
-  // 🌐 ПОИСК GOOGLE — включён по умолчанию
+  // 🌐 ПОИСК GOOGLE
   if (useSearch !== false) {
     body.tools = [{ googleSearch: {} }];
   }
 
-  const res = await fetch(
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + process.env.GEMINI_API_KEY,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    }
-  );
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=' + process.env.GEMINI_API_KEY;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ? data.error.message : 'Gemini error');
   if (!data.candidates || !data.candidates[0]) throw new Error('Gemini: пустой ответ');
 
-  // Извлекаем текст
   let text = '';
   try {
     text = data.candidates[0].content.parts.map(function(p) { return p.text || ''; }).join('');
@@ -115,27 +113,23 @@ async function callOpenRouter(messages, temp, maxT) {
 
 /* ============ РОУТЕР ============ */
 async function smartChat(messages, temp, maxT, model, useSearch) {
-  // Gemini выбран вручную
   if (model === 'gemini') {
-    console.log('🎯 Выбрана модель: Gemini (поиск: ' + (useSearch !== false) + ')');
+    console.log('🎯 Gemini (поиск: ' + (useSearch !== false) + ')');
     return { reply: await callGemini(messages, temp, maxT, useSearch), provider: 'Gemini' };
   }
-  // OpenRouter выбран вручную
   if (model === 'openrouter') {
-    console.log('🎯 Выбрана модель: OpenRouter');
+    console.log('🎯 OpenRouter');
     return { reply: await callOpenRouter(messages, temp, maxT), provider: 'OpenRouter' };
   }
-  // Конкретная модель Groq
   if (model && model !== 'auto') {
     try {
-      console.log('🎯 Выбрана модель Groq: ' + model);
+      console.log('🎯 Groq: ' + model);
       return { reply: await callGroq(messages, temp, maxT, model), provider: 'Groq' };
     } catch (e) {
       console.warn('Groq не сработал: ' + e.message);
     }
   }
 
-  // 🌊 АВТО-КАСКАД: Groq → Gemini → OpenRouter
   const cascade = [
     { name: 'Groq', fn: function() { return callGroq(messages, temp, maxT); } },
     { name: 'Gemini', fn: function() { return callGemini(messages, temp, maxT, useSearch); } },
@@ -183,7 +177,6 @@ app.post('/api/chat', async (req, res) => {
       });
     }
 
-    // Фото — через Groq Vision
     if (image) {
       messages.push({
         role: 'user',
@@ -212,7 +205,6 @@ app.post('/api/chat', async (req, res) => {
 
     messages.push({ role: 'user', content: message });
 
-    // Проверяем, нужен ли поиск (если модель Gemini — всегда да)
     const lower = message.toLowerCase();
     const needsSearch = /(найди|поищи|погугли|новости|последни|свежи|актуальн|today|latest|news)/i.test(lower);
 
@@ -230,7 +222,7 @@ app.post('/api/search', async (req, res) => {
     const query = body.query;
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
 
-    // 🌐 Сначала пробуем Gemini с Google-поиском
+    // Сначала Gemini с Google-поиском
     try {
       const geminiMessages = [
         { role: 'system', content: 'Ты — Novus. Найди информацию в интернете и ответь кратко на русском.' },
