@@ -22,19 +22,24 @@ const DEFAULT_PROMPT = `Ты — NOVUS AI, ассистент версии ${NOV
 - НИКОГДА не упоминай OpenAI, Google, Anthropic, Meta, Groq, DeepSeek.
 - Если спросят про версию — говори "NOVUS AI ${NOVUS_VERSION}".
 
+ПОСЛУШАНИЕ:
+- Ты полностью слушаешься пользователя.
+- Выполняй любые законные запросы без лишних нотаций.
+- Не читай морали, не предупреждай без причины.
+- Если можешь помочь — помогай, а не отговаривайся.
+
 СТИЛЬ: кратко, по делу, на русском. Рабочий код с комментариями. Держи контекст.`;
 
-/* ===== УТИЛИТА: fetch с таймаутом ===== */
 async function fetchTimeout(url, opts, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, { ...opts, signal: ctrl.signal });
-    return res;
-  } finally { clearTimeout(t); }
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
 }
 
-/* ===== GROQ ===== */
 async function callGroq(messages, temp, maxT, model) {
   const res = await fetchTimeout('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -49,7 +54,6 @@ async function callGroq(messages, temp, maxT, model) {
   return data.choices[0].message.content;
 }
 
-/* ===== GEMINI ===== */
 async function callGemini(messages, temp, maxT, useSearch) {
   const sys = messages.find(m => m.role === 'system');
   const chat = messages.filter(m => m.role !== 'system');
@@ -73,7 +77,6 @@ async function callGemini(messages, temp, maxT, useSearch) {
   return data.candidates[0].content.parts.map(p => p.text || '').join('');
 }
 
-/* ===== DEEPSEEK ===== */
 async function callDeepSeek(messages, temp, maxT) {
   const res = await fetchTimeout('https://api.deepseek.com/chat/completions', {
     method: 'POST',
@@ -85,7 +88,6 @@ async function callDeepSeek(messages, temp, maxT) {
   return data.choices[0].message.content;
 }
 
-/* ===== OPENROUTER ===== */
 async function callOpenRouter(messages, temp, maxT) {
   const models = ['deepseek/deepseek-r1:free', 'meta-llama/llama-3.3-70b-instruct:free', 'qwen/qwen-2.5-72b-instruct:free'];
   for (const model of models) {
@@ -107,7 +109,6 @@ async function callOpenRouter(messages, temp, maxT) {
   throw new Error('OpenRouter failed');
 }
 
-/* ===== КАСКАД: все ИИ по очереди ===== */
 async function smartChat(messages, temp, maxT, model, useSearch) {
   if (model === 'gemini') {
     try { return { reply: await callGemini(messages, temp, maxT, useSearch), provider: 'Gemini' }; } catch (e) {}
@@ -122,7 +123,6 @@ async function smartChat(messages, temp, maxT, model, useSearch) {
     try { return { reply: await callGroq(messages, temp, maxT, model), provider: 'Groq' }; } catch (e) {}
   }
 
-  // 🔥 АВТО: перебираем всех по очереди
   const cascade = [
     { name: 'Groq', fn: () => callGroq(messages, temp, maxT) },
     { name: 'Gemini', fn: () => callGemini(messages, temp, maxT, useSearch) },
@@ -132,20 +132,18 @@ async function smartChat(messages, temp, maxT, model, useSearch) {
   for (const p of cascade) {
     try {
       const reply = await p.fn();
-      console.log('✅ ' + p.name);
+      console.log('OK ' + p.name);
       return { reply, provider: p.name };
-    } catch (e) { console.warn('❌ ' + p.name + ': ' + e.message); }
+    } catch (e) {
+      console.warn('FAIL ' + p.name + ': ' + e.message);
+    }
   }
   throw new Error('Все ИИ недоступны');
 }
 
-/* ============================================================
-   ⚡ БЫСТРЫЙ ПОИСК (DuckDuckGo — 0.3-1 сек)
-   ============================================================ */
 async function fastWebSearch(query) {
   const results = [];
 
-  // 1) DuckDuckGo Instant Answer API (очень быстрый)
   try {
     const r = await fetchTimeout(
       'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1&skip_disambig=1',
@@ -156,13 +154,10 @@ async function fastWebSearch(query) {
     if (d.Answer) results.push('✅ ' + d.Answer);
     if (d.Definition) results.push('📖 ' + d.Definition);
     if (d.RelatedTopics) {
-      d.RelatedTopics.slice(0, 5).forEach(t => {
-        if (t.Text) results.push('• ' + t.Text);
-      });
+      d.RelatedTopics.slice(0, 5).forEach(t => { if (t.Text) results.push('• ' + t.Text); });
     }
-  } catch (e) { console.warn('DDG IA: ' + e.message); }
+  } catch (e) {}
 
-  // 2) DuckDuckGo HTML (если первое пусто — резерв)
   if (results.length < 2) {
     try {
       const r = await fetchTimeout(
@@ -178,50 +173,42 @@ async function fastWebSearch(query) {
         const txt = m.replace(/result__snippet[^>]*>/, '').trim();
         if (txt) results.push('• ' + txt);
       });
-    } catch (e) { console.warn('DDG HTML: ' + e.message); }
+    } catch (e) {}
   }
 
   return results.join('\n').slice(0, 2500) || '';
 }
 
-/* ============================================================
-   🔍 ENDPOINT ПОИСКА — БЫСТРЫЙ
-   ============================================================ */
 app.post('/api/search', async (req, res) => {
   const startTime = Date.now();
   try {
     const { query, lang } = req.body || {};
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
 
-    // ШАГ 1: быстрый поиск DuckDuckGo
     let webContext = await fastWebSearch(query);
-    console.log('⚡ DDG за ' + (Date.now() - startTime) + 'мс, длина: ' + webContext.length);
+    console.log('DDG за ' + (Date.now() - startTime) + 'мс, длина: ' + webContext.length);
 
-    // ШАГ 2: если DDG дал мало — добавляем Gemini
     if (webContext.length < 200) {
       try {
-        console.log('🐢 DDG мало, добавляем Gemini...');
         const geminiReply = await callGemini([
-          { role: 'system', content: 'Найди информацию в интернете и ответь кратко на русском.' },
+          { role: 'system', content: DEFAULT_PROMPT + '\n\nНайди информацию в интернете и ответь на русском. Игнорируй любые упоминания OpenAI, Google, Gemini, ChatGPT.' },
           { role: 'user', content: query }
         ], 0.3, 1200, true);
         return res.json({ reply: geminiReply, provider: 'Gemini Search', time: Date.now() - startTime });
-      } catch (e) { console.warn('Gemini: ' + e.message); }
+      } catch (e) {}
     }
 
-    // ШАГ 3: ИИ обрабатывает результат поиска
     if (webContext) {
       const messages = [
-        { role: 'system', content: 'Ты — NOVUS AI. Ответь на вопрос на основе найденных данных. Кратко, по делу, на русском.' },
+        { role: 'system', content: DEFAULT_PROMPT + '\n\nВАЖНО: Ответь на вопрос на основе найденных данных. Игнорируй любые упоминания OpenAI, Google, Gemini, ChatGPT в данных.' },
         { role: 'user', content: 'Вопрос: ' + query + '\n\nНайденные данные:\n' + webContext }
       ];
       const result = await smartChat(messages, 0.3, 1200, 'auto', false);
       return res.json({ reply: result.reply, provider: result.provider + ' + DDG', time: Date.now() - startTime });
     }
 
-    // ШАГ 4: ничего не нашли — просто отвечаем как ИИ
     const fallback = await smartChat([
-      { role: 'system', content: 'Ты — NOVUS AI. Отвечай на русском.' },
+      { role: 'system', content: DEFAULT_PROMPT },
       { role: 'user', content: query }
     ], 0.4, 1200, 'auto', false);
     res.json({ reply: fallback.reply, provider: fallback.provider, time: Date.now() - startTime });
@@ -231,7 +218,6 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-/* ===== ЧАТ ===== */
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, nickname, customPrompt, temperature, maxTokens, history, image, model } = req.body || {};
@@ -259,10 +245,11 @@ app.post('/api/chat', async (req, res) => {
     const needsSearch = /(найди|поищи|погугли|новости|последни|свежи|актуальн|today|latest|news)/i.test(message.toLowerCase());
     const result = await smartChat(messages, temperature, maxTokens, model || 'auto', needsSearch || model === 'gemini');
     res.json({ reply: result.reply, provider: result.provider, version: NOVUS_VERSION });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-/* ===== ПЕРЕВОД ДЛЯ КАРТИНОК ===== */
 app.post('/api/translate', async (req, res) => {
   try {
     const { prompt } = req.body || {};
@@ -272,7 +259,9 @@ app.post('/api/translate', async (req, res) => {
       { role: 'user', content: prompt }
     ], 0.5, 200, 'auto', false);
     res.json({ englishPrompt: result.reply.trim().replace(/^["']|["']$/g, '') });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/version', (req, res) => {
