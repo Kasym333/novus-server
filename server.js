@@ -22,39 +22,36 @@ const PROMPT = `
 6. Эмодзи 0–2 на сообщение.
 `;
 
-// 🔄 Список бесплатных моделей OpenRouter для fallback
 const OPENROUTER_FREE_MODELS = [
   'deepseek/deepseek-r1:free',
   'meta-llama/llama-3.3-70b-instruct:free',
   'google/gemini-2.0-flash-exp:free',
-  'qwen/qwen3-coder:free',
-  'mistralai/mistral-7b-instruct:free'
+  'qwen/qwen3-coder:free'
 ];
 
-// ============ ФУНКЦИЯ ВЫЗОВА ЧЕРЕЗ GROQ ============
-async function callGroq(messages, temperature = 0.5, max_tokens = 2048) {
+async function callGroq(messages, temperature = 0.5, max_tokens = 2048, useSearch = true) {
+  const body = {
+    model: 'openai/gpt-oss-120b',
+    messages,
+    temperature,
+    max_tokens
+  };
+  if (useSearch) body.tools = [{ type: 'browser_search' }];
+
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
     },
-    body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
-      messages,
-      temperature,
-      max_tokens,
-      tools: [{ type: 'browser_search' }]
-    })
+    body: JSON.stringify(body)
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'Ошибка Groq');
   return { reply: data.choices[0].message.content, provider: 'Groq' };
 }
 
-// ============ ФУНКЦИЯ ВЫЗОВА ЧЕРЕЗ OPENROUTER ============
 async function callOpenRouter(messages, temperature = 0.5, max_tokens = 2048) {
-  // Пробуем модели по очереди, пока одна не ответит
   for (const model of OPENROUTER_FREE_MODELS) {
     try {
       const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -68,49 +65,94 @@ async function callOpenRouter(messages, temperature = 0.5, max_tokens = 2048) {
         body: JSON.stringify({ model, messages, temperature, max_tokens })
       });
       const data = await res.json();
-      if (res.ok) {
-        return { reply: data.choices[0].message.content, provider: `OpenRouter (${model})` };
-      }
-      console.warn(`OpenRouter ${model} не сработал:`, data.error?.message);
-    } catch (e) {
-      console.warn(`OpenRouter ${model} упал:`, e.message);
-    }
+      if (res.ok) return { reply: data.choices[0].message.content, provider: `OpenRouter (${model})` };
+    } catch (e) {}
   }
-  throw new Error('Все бесплатные модели OpenRouter недоступны');
+  throw new Error('Все модели OpenRouter недоступны');
 }
 
-// ============ УМНЫЙ РОУТИНГ: Groq → OpenRouter ============
-async function smartChat(messages, temperature = 0.5, max_tokens = 2048) {
-  // 1. Сначала пробуем Groq
+async function smartChat(messages, temperature = 0.5, max_tokens = 2048, useSearch = true) {
   try {
-    return await callGroq(messages, temperature, max_tokens);
+    return await callGroq(messages, temperature, max_tokens, useSearch);
   } catch (e) {
-    console.warn('Groq не сработал, переключаюсь на OpenRouter:', e.message);
+    console.warn('Groq упал, переключаюсь:', e.message);
   }
-  // 2. Если Groq упал — пробуем OpenRouter
   return await callOpenRouter(messages, temperature, max_tokens);
 }
 
-/* ============ ОБЫЧНЫЙ ЧАТ ============ */
+/* ============ ЧАТ С ПАМЯТЬЮ (summary + история) ============ */
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, nickname } = req.body;
+    const { message, nickname, summary, history } = req.body;
     if (!message) return res.status(400).json({ error: 'Пустое сообщение' });
-    
+
     const hint = nickname ? `\nПользователя зовут ${nickname}.` : '';
+    const summaryBlock = summary
+      ? `\n\n[КРАТКАЯ СВОДКА ПРОШЛОЙ БЕСЕДЫ]\n${summary}\n[КОНЕЦ СВОДКИ]`
+      : '';
 
-    const result = await smartChat([
-      { role: 'system', content: PROMPT + hint },
-      { role: 'user', content: message }
-    ]);
+    // Собираем контекст: system + summary + история из клиента + новое сообщение
+    const msgs = [
+      { role: 'system', content: PROMPT + hint + summaryBlock }
+    ];
 
+    if (Array.isArray(history)) {
+      history.forEach(h => {
+        if (h.role && h.content) msgs.push({ role: h.role, content: h.content });
+      });
+    }
+    msgs.push({ role: 'user', content: message });
+
+    const result = await smartChat(msgs, 0.5, 2048, true);
     res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка: ' + e.message });
   }
 });
 
-/* ============ ПОИСК В ИНТЕРНЕТЕ ============ */
+/* ============ СВОДКА СТАРЫХ СООБЩЕНИЙ ============ */
+app.post('/api/summary', async (req, res) => {
+  try {
+    const { oldSummary, messages } = req.body;
+    if (!Array.isArray(messages) || !messages.length) {
+      return res.json({ summary: oldSummary || '' });
+    }
+
+    // Формируем диалог для сжатия
+    let dialog = '';
+    messages.forEach(m => {
+      if (m.type === 'image') dialog += `[картинка]\n`;
+      else dialog += `${m.role === 'user' ? 'Пользователь' : 'ИИ'}: ${m.content}\n`;
+    });
+
+    const prompt = `Ты — сжиматель истории диалога. Сделай КРАТКУЮ СВОДКУ переписки на русском языке.
+
+ПРАВИЛА:
+1. Максимум 300 слов.
+2. Сохрани все важные факты, имена, темы, решения.
+3. Убери воду, приветствия, повторы.
+4. Пиши в формате: "Пользователь спрашивал о... ИИ отвечал... Обсуждали..."
+${oldSummary ? `\n[Предыдущая сводка — объедини её с новой]\n${oldSummary}\n` : ''}
+
+Переписка для сжатия:
+${dialog}
+
+Верни ТОЛЬКО текст сводки, без пояснений.`;
+
+    const result = await smartChat(
+      [{ role: 'user', content: prompt }],
+      0.3,
+      800,
+      false  // без поиска
+    );
+
+    res.json({ summary: result.reply.trim(), provider: result.provider });
+  } catch (e) {
+    res.status(500).json({ error: 'Ошибка сводки: ' + e.message });
+  }
+});
+
+/* ============ ПОИСК ============ */
 app.post('/api/search', async (req, res) => {
   try {
     const { query } = req.body;
@@ -129,9 +171,9 @@ app.post('/api/search', async (req, res) => {
     } catch (e) { webContext = 'Не удалось получить данные.'; }
 
     const result = await smartChat([
-      { role: 'system', content: 'Ты — Novus_Куёвус с доступом к свежим данным из интернета. Отвечай на основе результатов поиска, кратко.' },
-      { role: 'user', content: `Запрос: ${query}\n\nДанные из поиска:\n${webContext}` }
-    ], 0.3, 1500);
+      { role: 'system', content: 'Ты — Novus_Куёвус. Отвечай на основе результатов поиска, кратко.' },
+      { role: 'user', content: `Запрос: ${query}\n\nДанные:\n${webContext}` }
+    ], 0.3, 1500, false);
 
     res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
@@ -139,7 +181,7 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-/* ============ УМНЫЙ ПРОМПТ ДЛЯ КАРТИНОК ============ */
+/* ============ ПРОМПТ ДЛЯ КАРТИНОК ============ */
 app.post('/api/translate', async (req, res) => {
   try {
     const { prompt } = req.body;
@@ -147,40 +189,34 @@ app.post('/api/translate', async (req, res) => {
 
     let webContext = '';
     try {
-      const ddgRes = await fetch(
-        'https://api.duckduckgo.com/?q=' + encodeURIComponent(prompt) + '&format=json&no_html=1&skip_disambig=1'
-      );
+      const ddgRes = await fetch('https://api.duckduckgo.com/?q=' + encodeURIComponent(prompt) + '&format=json&no_html=1&skip_disambig=1');
       const ddgData = await ddgRes.json();
       const parts = [];
       if (ddgData.AbstractText) parts.push(ddgData.AbstractText);
-      if (ddgData.RelatedTopics) {
-        ddgData.RelatedTopics.slice(0, 5).forEach(t => { if (t.Text) parts.push(t.Text); });
-      }
+      if (ddgData.RelatedTopics) ddgData.RelatedTopics.slice(0, 5).forEach(t => { if (t.Text) parts.push(t.Text); });
       webContext = parts.join(' ').slice(0, 1000);
     } catch (e) {}
 
-    const systemPrompt = `Ты — эксперт по промптам для AI-генераторов картинок (Stable Diffusion, Flux, Midjourney).
-Пользователь просит нарисовать что-то. Тебе дают данные из интернета о том, что это.
-Создай ОДИН максимально точный английский промпт.
+    const sysPrompt = `Ты — эксперт по промптам для AI-генераторов картинок.
+Создай ОДИН точный английский промпт (макс 40-50 слов).
 ПРАВИЛА:
-1. Отвечай ТОЛЬКО английским текстом промпта. Без кавычек, без объяснений.
-2. Максимум 40-50 слов.
-3. Если это персонаж/игра/фильм — используй ТОЧНЫЕ детали внешности.
-4. Обязательно добавляй: "highly detailed", "cinematic lighting", "8k", "professional", "masterpiece".
-5. Указывай стиль: "digital art", "photorealistic", "anime style", "horror poster", "3d render".
-6. Не выдумывай — используй данные из интернета.`;
+1. Только английский текст, без кавычек.
+2. Добавляй: "highly detailed", "cinematic lighting", "8k", "masterpiece".
+3. Стиль: "digital art", "photorealistic", "anime style", "horror poster".
+4. Если персонаж/игра — точные детали внешности.
+5. Не выдумывай — используй данные из интернета.`;
 
     const userContent = webContext
       ? `Запрос: ${prompt}\n\nДанные из интернета: ${webContext}`
       : `Запрос: ${prompt}`;
 
     const result = await smartChat([
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: sysPrompt },
       { role: 'user', content: userContent }
-    ], 0.5, 200);
+    ], 0.5, 200, false);
 
     let englishPrompt = result.reply.trim().replace(/^["']|["']$/g, '');
-    res.json({ englishPrompt, usedWebSearch: webContext.length > 0, provider: result.provider });
+    res.json({ englishPrompt, usedWebSearch: webContext.length > 0 });
   } catch (e) {
     res.status(500).json({ error: 'Ошибка перевода: ' + e.message });
   }
