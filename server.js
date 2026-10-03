@@ -11,12 +11,10 @@ app.use((req, res, next) => {
   next();
 });
 
-const DEFAULT_PROMPT = `Ты — Novus, умный ассистент. Отвечай грамотно, по делу, без воды.
-Понимаешь сленг, опечатки, разговорную речь. Если не знаешь — честно скажи.
-Если просят код — давай рабочий код с краткими пояснениями.`;
+const DEFAULT_PROMPT = `Ты — Novus, умный ассистент. Отвечай грамотно, по делу. Понимаешь сленг, опечатки. Если просят код — давай рабочий код. Держи контекст беседы.`;
 
-// ============ GROQ ============
-async function callGroq(messages, temperature, maxTokens) {
+/* ============ GROQ ============ */
+async function callGroq(messages, temp, maxT) {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -25,32 +23,33 @@ async function callGroq(messages, temperature, maxTokens) {
     },
     body: JSON.stringify({
       model: 'openai/gpt-oss-120b',
-      messages,
-      temperature: temperature ?? 0.5,
-      max_tokens: maxTokens ?? 2048
+      messages: messages,
+      temperature: temp || 0.6,
+      max_tokens: maxT || 2048
     })
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || 'Groq error');
+  if (!res.ok) throw new Error(data.error ? data.error.message : 'Groq error');
   return data.choices[0].message.content;
 }
 
-// ============ GEMINI ============
-async function callGemini(messages, temperature, maxTokens) {
-  // Достаём system + превращаем историю в формат Gemini
-  const systemMsg = messages.find(m => m.role === 'system');
-  const chatMsgs = messages.filter(m => m.role !== 'system');
+/* ============ GEMINI ============ */
+async function callGemini(messages, temp, maxT) {
+  const systemMsg = messages.find(function(m) { return m.role === 'system'; });
+  const chatMsgs = messages.filter(function(m) { return m.role !== 'system'; });
 
-  const contents = chatMsgs.map(m => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }]
-  }));
+  const contents = chatMsgs.map(function(m) {
+    return {
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    };
+  });
 
   const body = {
-    contents,
+    contents: contents,
     generationConfig: {
-      temperature: temperature ?? 0.5,
-      maxOutputTokens: maxTokens ?? 2048
+      temperature: temp || 0.6,
+      maxOutputTokens: maxT || 2048
     }
   };
 
@@ -67,12 +66,12 @@ async function callGemini(messages, temperature, maxTokens) {
     }
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || 'Gemini error');
+  if (!res.ok) throw new Error(data.error ? data.error.message : 'Gemini error');
   return data.candidates[0].content.parts[0].text;
 }
 
-// ============ DEEPSEEK ============
-async function callDeepSeek(messages, temperature, maxTokens) {
+/* ============ DEEPSEEK ============ */
+async function callDeepSeek(messages, temp, maxT) {
   const res = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
     headers: {
@@ -81,22 +80,52 @@ async function callDeepSeek(messages, temperature, maxTokens) {
     },
     body: JSON.stringify({
       model: 'deepseek-chat',
-      messages,
-      temperature: temperature ?? 0.5,
-      max_tokens: maxTokens ?? 2048
+      messages: messages,
+      temperature: temp || 0.6,
+      max_tokens: maxT || 2048
     })
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || 'DeepSeek error');
+  if (!res.ok) throw new Error(data.error ? data.error.message : 'DeepSeek error');
   return data.choices[0].message.content;
 }
 
-// ============ КАСКАД: Groq → Gemini → DeepSeek ============
-async function smartChat(messages, temperature, maxTokens) {
+/* ============ OPENROUTER (резерв) ============ */
+async function callOpenRouter(messages, temp, maxT) {
+  const models = [
+    'deepseek/deepseek-r1:free',
+    'meta-llama/llama-3.3-70b-instruct:free',
+    'google/gemini-2.0-flash-exp:free'
+  ];
+  for (const model of models) {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + process.env.OPENROUTER_API_KEY,
+          'HTTP-Referer': 'https://novus-server-0vtv.onrender.com',
+          'X-Title': 'Novus'
+        },
+        body: JSON.stringify({
+          model: model, messages: messages,
+          temperature: temp || 0.6, max_tokens: maxT || 2048
+        })
+      });
+      const data = await res.json();
+      if (res.ok) return data.choices[0].message.content;
+    } catch (e) {}
+  }
+  throw new Error('OpenRouter failed');
+}
+
+/* ============ КАСКАД: Groq → Gemini → DeepSeek → OpenRouter ============ */
+async function smartChat(messages, temp, maxT) {
   const providers = [
-    { name: 'Groq', fn: () => callGroq(messages, temperature, maxTokens) },
-    { name: 'Gemini', fn: () => callGemini(messages, temperature, maxTokens) },
-    { name: 'DeepSeek', fn: () => callDeepSeek(messages, temperature, maxTokens) }
+    { name: 'Groq', fn: function() { return callGroq(messages, temp, maxT); } },
+    { name: 'Gemini', fn: function() { return callGemini(messages, temp, maxT); } },
+    { name: 'DeepSeek', fn: function() { return callDeepSeek(messages, temp, maxT); } },
+    { name: 'OpenRouter', fn: function() { return callOpenRouter(messages, temp, maxT); } }
   ];
 
   let lastError = null;
@@ -104,16 +133,16 @@ async function smartChat(messages, temperature, maxTokens) {
     try {
       const reply = await p.fn();
       console.log('✅ Ответ от: ' + p.name);
-      return { reply, provider: p.name };
+      return { reply: reply, provider: p.name };
     } catch (e) {
-      console.warn('❌ ' + p.name + ' упал:', e.message);
+      console.warn('❌ ' + p.name + ' упал: ' + e.message);
       lastError = e;
     }
   }
   throw lastError || new Error('Все ИИ недоступны');
 }
 
-// ============ ЧАТ ============
+/* ============ ЧАТ С ПАМЯТЬЮ ============ */
 app.post('/api/chat', async (req, res) => {
   try {
     const body = req.body || {};
@@ -122,27 +151,65 @@ app.post('/api/chat', async (req, res) => {
     const customPrompt = body.customPrompt;
     const temperature = body.temperature;
     const maxTokens = body.maxTokens;
+    const history = body.history;
+    const image = body.image;
 
-    if (!message) return res.status(400).json({ error: 'Пустое сообщение' });
+    if (!message && !image) return res.status(400).json({ error: 'Пустое сообщение' });
 
     const prompt = customPrompt || DEFAULT_PROMPT;
     const hint = nickname ? ('\nПользователя зовут ' + nickname + '.') : '';
-    const messages = [
-      { role: 'system', content: prompt + hint },
-      { role: 'user', content: message }
-    ];
+    const messages = [{ role: 'system', content: prompt + hint }];
+
+    // 🧠 ДОБАВЛЯЕМ ИСТОРИЮ
+    if (Array.isArray(history)) {
+      history.forEach(function(h) {
+        if (h && h.role && h.content) {
+          messages.push({ role: h.role, content: h.content });
+        }
+      });
+    }
+
+    // 🖼 Если фото — используем vision
+    if (image) {
+      messages.push({
+        role: 'user',
+        content: [
+          { type: 'text', text: message || 'Опиши изображение' },
+          { type: 'image_url', image_url: { url: image } }
+        ]
+      });
+      const vRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + process.env.GROQ_API_KEY
+        },
+        body: JSON.stringify({
+          model: 'meta-llama/llama-4-scout-17b-16e-instruct',
+          messages: messages,
+          temperature: 0.5,
+          max_tokens: 1024
+        })
+      });
+      const vData = await vRes.json();
+      if (!vRes.ok) return res.status(500).json({ error: vData.error ? vData.error.message : 'Vision error' });
+      return res.json({ reply: vData.choices[0].message.content, provider: 'Groq Vision' });
+    }
+
+    messages.push({ role: 'user', content: message });
 
     const result = await smartChat(messages, temperature, maxTokens);
     res.json({ reply: result.reply, provider: result.provider });
   } catch (e) {
-    res.status(500).json({ error: 'Все ИИ недоступны: ' + e.message });
+    res.status(500).json({ error: 'Ошибка: ' + e.message });
   }
 });
 
-// ============ ПОИСК ============
+/* ============ ПОИСК ============ */
 app.post('/api/search', async (req, res) => {
   try {
-    const { query } = req.body;
+    const body = req.body || {};
+    const query = body.query;
     if (!query) return res.status(400).json({ error: 'Пустой запрос' });
 
     let webContext = '';
@@ -152,7 +219,7 @@ app.post('/api/search', async (req, res) => {
       const parts = [];
       if (ddgData.AbstractText) parts.push(ddgData.AbstractText);
       if (ddgData.RelatedTopics) {
-        ddgData.RelatedTopics.slice(0, 5).forEach(t => { if (t.Text) parts.push(t.Text); });
+        ddgData.RelatedTopics.slice(0, 5).forEach(function(t) { if (t.Text) parts.push(t.Text); });
       }
       webContext = parts.join(' ') || 'Нет данных';
     } catch (e) { webContext = 'Ошибка поиска'; }
@@ -168,10 +235,11 @@ app.post('/api/search', async (req, res) => {
   }
 });
 
-// ============ ПЕРЕВОД ПРОМПТА ДЛЯ КАРТИНОК ============
+/* ============ ПЕРЕВОД ДЛЯ КАРТИНОК ============ */
 app.post('/api/translate', async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const body = req.body || {};
+    const prompt = body.prompt;
     if (!prompt) return res.status(400).json({ error: 'Пустой промпт' });
 
     const messages = [
@@ -186,6 +254,6 @@ app.post('/api/translate', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, function() {
   console.log('Сервер запущен на порту ' + PORT);
 });
